@@ -5224,6 +5224,10 @@ window.__WEB_IFC_WASM_B64__ = "AGFzbQEAAAAB9QiEAWACf38AYAF/AGABfwF/YAJ/fwF/YAN/f
   controls.dampingFactor = 0.08;
   controls.screenSpacePanning = true;
   controls.touches = { ONE: THREE.TOUCH.ROTATE, TWO: THREE.TOUCH.DOLLY_PAN };
+  // Slightly gentler than OrbitControls' default of 1.0 for both, per user feedback that
+  // rotate/pan felt too sensitive on a phone touchscreen. Zoom speed is left untouched.
+  controls.rotateSpeed = 0.65;
+  controls.panSpeed = 0.65;
   // Zoom toward the pinch/scroll point instead of always toward the fixed orbit target,
   // so pinching in on a specific part of the model (a valve, a joint, etc.) zooms in on
   // that spot rather than recentering on whatever the camera currently orbits around.
@@ -5386,12 +5390,50 @@ window.__WEB_IFC_WASM_B64__ = "AGFzbQEAAAAB9QiEAWACf38AYAF/AGABfwF/YAJ/fwF/YAN/f
     el.fileInput.value = "";
   });
 
+  /* IFC/STEP files vary in text encoding in practice: modern exporters write UTF-8, the
+     STEP standard technically calls for ISO-8859-1 text with \X2\HEX\X0\ (or \X4\HEX\X0\)
+     escapes for anything outside Latin-1, and a number of authoring tools (common among
+     older or Japanese CAD/BIM software) instead write raw Shift_JIS bytes directly into the
+     file. web-ifc reads the buffer we give it as UTF-8, so any of these mismatches surface
+     as garbled ("文字化け") element/storey/type names. Detect and normalize to clean UTF-8
+     text (also resolving any literal STEP unicode escapes) before handing bytes to web-ifc. */
+  function decodeStepUnicodeEscapes(text) {
+    text = text.replace(/\\X2\\([0-9A-Fa-f]+)\\X0\\/g, function (m, hex) {
+      var out = "";
+      for (var i = 0; i + 4 <= hex.length; i += 4) out += String.fromCharCode(parseInt(hex.substr(i, 4), 16));
+      return out;
+    });
+    text = text.replace(/\\X4\\([0-9A-Fa-f]+)\\X0\\/g, function (m, hex) {
+      var out = "";
+      for (var i = 0; i + 8 <= hex.length; i += 8) out += String.fromCodePoint(parseInt(hex.substr(i, 8), 16));
+      return out;
+    });
+    return text;
+  }
+
+  function normalizeIfcBytes(bytes) {
+    var text;
+    try {
+      text = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+    } catch (e) {
+      try {
+        text = new TextDecoder("shift_jis").decode(bytes);
+      } catch (e2) {
+        return bytes; // unrecognized encoding: pass through unchanged rather than fail the load
+      }
+    }
+    if (text.indexOf("\\X2\\") !== -1 || text.indexOf("\\X4\\") !== -1) {
+      text = decodeStepUnicodeEscapes(text);
+    }
+    return new TextEncoder().encode(text);
+  }
+
   function loadIfcFile(file) {
     setLoading(true, "IFCファイルを読込中…", 5);
     el.emptyState.style.display = "none";
     file.arrayBuffer().then(function (buf) {
       setLoading(true, "解析中…", 15);
-      return openModel(new Uint8Array(buf), file.name);
+      return openModel(normalizeIfcBytes(new Uint8Array(buf)), file.name);
     }).catch(function (err) {
       console.error(err);
       setLoading(false);
@@ -5846,9 +5888,9 @@ window.__WEB_IFC_WASM_B64__ = "AGFzbQEAAAAB9QiEAWACf38AYAF/AGABfwF/YAJ/fwF/YAN/f
 
   function measureMarkerRadius() {
     var box = state.bbox;
-    if (!box) return 0.05;
+    if (!box) return 0.015;
     var size = box.getSize(new THREE.Vector3());
-    return Math.max(size.length() * 0.004, 0.02);
+    return Math.max(size.length() * 0.0012, 0.006);
   }
 
   function updateMeasureTagPositions() {

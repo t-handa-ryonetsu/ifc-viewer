@@ -5888,9 +5888,9 @@ window.__WEB_IFC_WASM_B64__ = "AGFzbQEAAAAB9QiEAWACf38AYAF/AGABfwF/YAJ/fwF/YAN/f
 
   function measureMarkerRadius() {
     var box = state.bbox;
-    if (!box) return 0.015;
+    if (!box) return 0.00075;
     var size = box.getSize(new THREE.Vector3());
-    return Math.max(size.length() * 0.0012, 0.006);
+    return Math.max(size.length() * 0.00006, 0.0003);
   }
 
   function updateMeasureTagPositions() {

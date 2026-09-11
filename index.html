@@ -601,6 +601,22 @@ body {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+#info-card .pipe-size-row {
+  margin-top: 4px;
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--accent-strong);
+  font-family: var(--font-mono);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+#info-card .pipe-size-row b {
+  color: var(--text-muted);
+  font-weight: 500;
+  font-family: var(--font-ui);
+  margin-right: 4px;
+}
 #info-card .meta-row {
   display: flex;
   gap: 14px;
@@ -712,6 +728,7 @@ body {
       <div class="body">
         <div class="type-label" id="info-type">IFCWALL</div>
         <div class="elem-name" id="info-name">要素名</div>
+        <div class="pipe-size-row" id="info-pipe-size" style="display:none"><b>配管サイズ:</b> <span id="info-pipe-size-value"></span></div>
         <div class="meta-row">
           <span id="info-storey"><b>階:</b> —</span>
           <span id="info-guid"><b>GUID:</b> —</span>
@@ -5178,6 +5195,8 @@ window.__WEB_IFC_WASM_B64__ = "AGFzbQEAAAAB9QiEAWACf38AYAF/AGABfwF/YAJ/fwF/YAN/f
     infoName: $("info-name"),
     infoStorey: $("info-storey"),
     infoGuid: $("info-guid"),
+    infoPipeSize: $("info-pipe-size"),
+    infoPipeSizeValue: $("info-pipe-size-value"),
     infoClose: $("info-close"),
     dockFloors: $("dock-floors"),
     dockSection: $("dock-section"),
@@ -5284,6 +5303,7 @@ window.__WEB_IFC_WASM_B64__ = "AGFzbQEAAAAB9QiEAWACf38AYAF/AGABfwF/YAJ/fwF/YAN/f
     storeys: [],              // [{id, name, elevation, group, count}]
     unassignedGroup: null,
     elementIndex: {},         // expressID -> {meshes:[], typeName, storeyId}
+    pipeSizeIndex: {},        // expressID -> display string (e.g. "150A"), only for piping elements
     bbox: null,               // THREE.Box3 of full model (world space)
     mode: "view",             // 'view' | 'measure'
     activeSheet: null,
@@ -5485,6 +5505,7 @@ window.__WEB_IFC_WASM_B64__ = "AGFzbQEAAAAB9QiEAWACf38AYAF/AGABfwF/YAJ/fwF/YAN/f
     modelRoot.clear();
     state.storeys = [];
     state.elementIndex = {};
+    state.pipeSizeIndex = {};
     state.modelID = null;
     state.bbox = null;
     deselectElement();
@@ -5501,6 +5522,7 @@ window.__WEB_IFC_WASM_B64__ = "AGFzbQEAAAAB9QiEAWACf38AYAF/AGABfwF/YAJ/fwF/YAN/f
       setLoading(true, "空間構成を解析中…", 30);
       var storeyMeta = readStoreys(modelID);
       var elemToStorey = readContainment(modelID);
+      state.pipeSizeIndex = readPipeSizes(modelID);
 
       setLoading(true, "ジオメトリを構築中…", 45);
       return buildGeometry(modelID, storeyMeta, elemToStorey);
@@ -5545,6 +5567,97 @@ window.__WEB_IFC_WASM_B64__ = "AGFzbQEAAAAB9QiEAWACf38AYAF/AGABfwF/YAJ/fwF/YAN/f
       }
     }
     return map;
+  }
+
+  /* Pipe-size extraction: many Japanese piping/HVAC CAD exporters (e.g. the Fukui Computer
+     Tfas/BE-Bridge lineage commonly used in this industry) attach custom, non-IFC-standard
+     property sets directly to each pipe element (IfcFlowSegment etc.) with fields such as
+     "connection_point_number_<n>_size" (already human-formatted, e.g. "A: 150 [A]") or
+     "nominal_outer_size_<n>" (a "nominal,outer" diameter pair, e.g. "150,165"). This looks for
+     those known field-name patterns across whatever property sets are attached to an element
+     (their own Pset names vary by exporter), and simply returns nothing for an element where
+     no such field is found rather than guessing. A cheap type check on each relationship's
+     related object skips the (much pricier) per-property scan for all non-piping elements. */
+  var PIPE_TYPE_NAMES = ["IFCFLOWSEGMENT", "IFCFLOWFITTING", "IFCPIPESEGMENT", "IFCPIPEFITTING",
+    "IFCFLOWCONTROLLER", "IFCFLOWTERMINAL", "IFCVALVE", "IFCDISTRIBUTIONELEMENT"];
+
+  function readPipeSizes(modelID) {
+    var api = state.ifcApi;
+    var pipeTypeCodes = {};
+    PIPE_TYPE_NAMES.forEach(function (n) {
+      if (typeof WebIFC[n] === "number") pipeTypeCodes[WebIFC[n]] = true;
+    });
+
+    var map = {};
+    var relIds = api.GetLineIDsWithType(modelID, WebIFC.IFCRELDEFINESBYPROPERTIES);
+    var CONN_SIZE_RE = /^connection_point_number_\d+_size$/;
+    var NOMINAL_OUTER_RE = /^nominal_outer_size_\d+$/;
+
+    for (var i = 0; i < relIds.size(); i++) {
+      var rel;
+      try { rel = api.GetLine(modelID, relIds.get(i)); } catch (e) { continue; }
+      var related = rel.RelatedObjects;
+      if (!rel.RelatingPropertyDefinition || !related || !related.length) continue;
+
+      var isPipeLike = false;
+      for (var k = 0; k < related.length; k++) {
+        var tcode;
+        try { tcode = api.GetLineType(modelID, related[k].value); } catch (e2) { continue; }
+        if (pipeTypeCodes[tcode]) { isPipeLike = true; break; }
+      }
+      if (!isPipeLike) continue;
+
+      var psetId = rel.RelatingPropertyDefinition.value;
+      var pset;
+      try { pset = api.GetLine(modelID, psetId); } catch (e) { continue; }
+      if (!pset || !pset.HasProperties) continue;
+
+      var connSizes = [];
+      var nominalOuter = null;
+      for (var p = 0; p < pset.HasProperties.length; p++) {
+        var prop;
+        try { prop = api.GetLine(modelID, pset.HasProperties[p].value); } catch (e3) { continue; }
+        var pname = prop && prop.Name && prop.Name.value;
+        if (!pname) continue;
+        var val = prop.NominalValue && prop.NominalValue.value;
+        if (typeof val !== "string" || !val) continue;
+        if (CONN_SIZE_RE.test(pname)) {
+          var cleaned = formatConnectionSize(val);
+          if (cleaned && connSizes.indexOf(cleaned) === -1) connSizes.push(cleaned);
+        } else if (!nominalOuter && NOMINAL_OUTER_RE.test(pname)) {
+          nominalOuter = formatNominalOuter(val);
+        }
+      }
+      var display = connSizes.length ? connSizes.join(" → ") : nominalOuter;
+      if (!display) continue;
+
+      for (var j = 0; j < related.length; j++) {
+        var id = related[j].value;
+        if (!map[id] || connSizes.length) map[id] = display;
+      }
+    }
+    return map;
+  }
+
+  function formatConnectionSize(raw) {
+    // Typical raw value: "A: 150 [A]" -- pull out the leading number and its bracketed unit
+    // (usually the Japanese nominal-diameter unit "A", e.g. "150A"); otherwise show it as-is.
+    var m = raw.match(/(\d+(?:\.\d+)?)\s*\[([^\]]+)\]/);
+    if (m) return m[1] + m[2];
+    var trimmed = raw.trim();
+    return trimmed && trimmed !== "0" ? trimmed : null;
+  }
+
+  function formatNominalOuter(raw) {
+    // Typical raw value: "150,165" -- a "nominal diameter, outer diameter (mm)" pair (verified
+    // against JIS carbon-steel-pipe dimension tables, e.g. 150A / 165.2mm). Skips placeholder
+    // "0" entries used for unused connection slots.
+    var parts = raw.split(",").map(function (s) { return s.trim(); }).filter(function (s) { return s.length; });
+    if (parts.length >= 2 && /^\d+(\.\d+)?$/.test(parts[0]) && /^\d+(\.\d+)?$/.test(parts[1]) &&
+      parts[0] !== "0" && parts[1] !== "0") {
+      return "呼び径" + parts[0] + " / 外径" + parts[1] + "mm";
+    }
+    return null;
   }
 
   function buildGeometry(modelID, storeyMeta, elemToStorey) {
@@ -5973,6 +6086,13 @@ window.__WEB_IFC_WASM_B64__ = "AGFzbQEAAAAB9QiEAWACf38AYAF/AGABfwF/YAJ/fwF/YAN/f
     el.infoName.textContent = name;
     el.infoStorey.innerHTML = "<b>階:</b> " + storeyName;
     el.infoGuid.innerHTML = "<b>GUID:</b> " + guid;
+    var pipeSize = state.pipeSizeIndex && state.pipeSizeIndex[expressID];
+    if (pipeSize) {
+      el.infoPipeSizeValue.textContent = pipeSize;
+      el.infoPipeSize.style.display = "";
+    } else {
+      el.infoPipeSize.style.display = "none";
+    }
     var color = entry.meshes[0] ? entry.meshes[0].material.color : new THREE.Color(0xff8f3c);
     el.infoSwatch.style.background = "#" + color.getHexString();
     el.infoCard.classList.add("show");
@@ -6098,6 +6218,7 @@ window.__WEB_IFC_WASM_B64__ = "AGFzbQEAAAAB9QiEAWACf38AYAF/AGABfwF/YAJ/fwF/YAN/f
     controls: controls,
     loadIfcBytes: function (bytes, name) { return openModel(bytes, name); },
     fitToVisible: fitToVisible,
+    selectElement: selectElement,
     simulateTapNDC: function (ndcX, ndcY) {
       raycaster.setFromCamera(new THREE.Vector2(ndcX, ndcY), camera);
       var hits = raycaster.intersectObject(modelRoot, true).filter(function (h) { return isEffectivelyVisible(h.object); });

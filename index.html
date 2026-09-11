@@ -5411,6 +5411,39 @@ window.__WEB_IFC_WASM_B64__ = "AGFzbQEAAAAB9QiEAWACf38AYAF/AGABfwF/YAJ/fwF/YAN/f
     return text;
   }
 
+  /* A third STEP escape form, ISO 10303-21's single-octet "\X\hh" escape, shows up in some
+     Japanese CAD/BIM exports used to smuggle a raw Shift_JIS byte stream through a supposedly
+     7-bit-clean STEP file: each byte >= 0x80 gets wrapped as \X\hh, while trail bytes of a
+     Shift_JIS pair that happen to already be printable ASCII (e.g. 0x7A 'z') are often left
+     completely unescaped. So \X\ and literal ASCII characters have to be reassembled into one
+     raw byte stream and decoded as Shift_JIS together -- decoding only the \X\ bytes on their
+     own would leave every other byte of each 2-byte character behind. This is scoped to
+     individual STEP string literals (and only literals that actually contain \X\) so it can
+     never touch ordinary ASCII/UTF-8 content elsewhere in the file. */
+  function decodeStepSingleByteEscapes(text) {
+    return text.replace(/'(?:[^']|'')*'/g, function (literal) {
+      if (literal.indexOf("\\X\\") === -1) return literal;
+      var inner = literal.slice(1, -1).replace(/''/g, "'");
+      var bytes = [];
+      var i = 0;
+      while (i < inner.length) {
+        if (inner.substr(i, 3) === "\\X\\" && /^[0-9A-Fa-f]{2}$/.test(inner.substr(i + 3, 2))) {
+          bytes.push(parseInt(inner.substr(i + 3, 2), 16));
+          i += 5;
+        } else {
+          bytes.push(inner.charCodeAt(i) & 0xff);
+          i += 1;
+        }
+      }
+      try {
+        var decoded = new TextDecoder("shift_jis").decode(new Uint8Array(bytes));
+        return "'" + decoded.replace(/'/g, "''") + "'";
+      } catch (e) {
+        return literal; // decode failed: leave the original escaped literal untouched
+      }
+    });
+  }
+
   function normalizeIfcBytes(bytes) {
     var text;
     try {
@@ -5424,6 +5457,9 @@ window.__WEB_IFC_WASM_B64__ = "AGFzbQEAAAAB9QiEAWACf38AYAF/AGABfwF/YAJ/fwF/YAN/f
     }
     if (text.indexOf("\\X2\\") !== -1 || text.indexOf("\\X4\\") !== -1) {
       text = decodeStepUnicodeEscapes(text);
+    }
+    if (text.indexOf("\\X\\") !== -1) {
+      text = decodeStepSingleByteEscapes(text);
     }
     return new TextEncoder().encode(text);
   }
